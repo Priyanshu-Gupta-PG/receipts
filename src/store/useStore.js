@@ -11,11 +11,19 @@ const initialState = {
   inputUrl: null,
   scrapedSource: null, // { url, markdown, durationMs }
   subject: null,
+  subjectDeepDive: null, // { url, markdown, durationMs } — full Wikipedia/bio scrape
   claims: [],
   summary: null,
   timeline: [], // { phase, label, status, detail?, durationMs?, ts }
   error: null,
   startedAt: null,
+
+  // Footprint
+  footprint: [], // [{ id, name, status, url, title, snippet, handle, deepData, ... }]
+  footprintStatus: "idle", // "idle" | "running" | "done" | "error"
+
+  // Evidence drill-down modal
+  drillTarget: null, // { source, claim, scraped?, quote? }
 };
 
 export const useStore = create((set, get) => ({
@@ -64,14 +72,24 @@ export const useStore = create((set, get) => ({
         ...c,
         evidence: [],
         evidenceLoading: false,
+        deepEvidence: null,
         verdict: null,
         status: "pending",
       })),
       status: "investigating",
+      footprintStatus: "running",
+      footprint: [],
       timeline: [
         ...markActiveAs(s.timeline, "done", {
           detail: `${claims.length} claim${claims.length === 1 ? "" : "s"} extracted`,
         }),
+        {
+          phase: "footprint",
+          label: "Mapping online footprint",
+          status: "active",
+          ts: Date.now(),
+          subItems: [],
+        },
         {
           phase: "investigate",
           label: "Pulling receipts across the web",
@@ -85,6 +103,58 @@ export const useStore = create((set, get) => ({
         },
       ],
     })),
+
+  // Footprint
+  upsertFootprintPlatform: (id, patch) =>
+    set((s) => {
+      const next = [...s.footprint];
+      const idx = next.findIndex((p) => p.id === id);
+      if (idx === -1) next.push({ id, ...patch });
+      else next[idx] = { ...next[idx], ...patch };
+      const found = next.filter((p) => p.status === "found" || p.status === "deep_done").length;
+      const total = next.length;
+      return {
+        footprint: next,
+        timeline: updatePhaseDetail(s.timeline, "footprint", `${found} platforms · ${total} checked`),
+      };
+    }),
+
+  setFootprintDone: () =>
+    set((s) => ({
+      footprintStatus: "done",
+      timeline: markPhaseAs(s.timeline, "footprint", "done"),
+    })),
+
+  setFootprintError: (msg) =>
+    set((s) => ({
+      footprintStatus: "error",
+      timeline: markPhaseAs(s.timeline, "footprint", "error", { detail: msg }),
+    })),
+
+  // Subject deep dive (Wikipedia / personal site bio)
+  setSubjectDeepDive: (data) => set({ subjectDeepDive: data }),
+
+  // Per-claim deep evidence (auto-scraped top result for exact quotes)
+  setClaimDeepEvidence: (claimId, deepEvidence) =>
+    set((s) => ({
+      claims: s.claims.map((c) =>
+        c.id === claimId ? { ...c, deepEvidence } : c
+      ),
+    })),
+
+  // Drill-down modal
+  openDrill: (source, claim) => set({ drillTarget: { source, claim, scraped: null, quote: null, error: null, loading: true } }),
+  setDrillScraped: (scraped) =>
+    set((s) =>
+      s.drillTarget ? { drillTarget: { ...s.drillTarget, scraped, loading: false } } : {}
+    ),
+  setDrillQuote: (quote) =>
+    set((s) => (s.drillTarget ? { drillTarget: { ...s.drillTarget, quote } } : {})),
+  setDrillError: (error) =>
+    set((s) =>
+      s.drillTarget ? { drillTarget: { ...s.drillTarget, error, loading: false } } : {}
+    ),
+  closeDrill: () => set({ drillTarget: null }),
 
   setClaimSearching: (claimId) =>
     set((s) => ({
@@ -203,4 +273,19 @@ function detailFor(claims, claimId, action) {
   const ok = list.filter((a) => a.status === "ok").length + (action?.status === "ok" ? 1 : 0);
   const total = Math.max(list.length, 1);
   return `${ok}/${total} actions · ${action?.label || ""}`;
+}
+
+function updatePhaseDetail(timeline, phaseId, detail) {
+  return timeline.map((step) =>
+    step.phase === phaseId ? { ...step, detail } : step
+  );
+}
+
+function markPhaseAs(timeline, phaseId, status, patch = {}) {
+  return timeline.map((step) => {
+    if (step.phase !== phaseId) return step;
+    const ts = Date.now();
+    const durationMs = ts - step.ts;
+    return { ...step, status, durationMs, ...patch };
+  });
 }
